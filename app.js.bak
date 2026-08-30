@@ -1,0 +1,989 @@
+/* 照片加边框 —— 无框架，纯 Canvas 实现 */
+
+const MAX_OUT = 4000;                 // 输出画布最长边上限（像素）
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+const el = {
+  dropZone:       document.getElementById('dropZone'),
+  fileInput:      document.getElementById('fileInput'),
+  sampleBtn:      document.getElementById('sampleBtn'),
+  fileName:       document.getElementById('fileName'),
+  sideScale:      document.getElementById('sideScale'),
+  topScale:       document.getElementById('topScale'),
+  bottomScale:    document.getElementById('bottomScale'),
+  sideScaleVal:   document.getElementById('sideScaleVal'),
+  topScaleVal:    document.getElementById('topScaleVal'),
+  bottomScaleVal: document.getElementById('bottomScaleVal'),
+  shadowToggle:   document.getElementById('shadowToggle'),
+  photoOpacity:   document.getElementById('photoOpacity'),
+  photoOpacityVal:document.getElementById('photoOpacityVal'),
+  photoAngle:     document.getElementById('photoAngle'),
+  photoAngleVal:  document.getElementById('photoAngleVal'),
+  baseToggle:     document.getElementById('baseToggle'),
+  cardOpacity:    document.getElementById('cardOpacity'),
+  cardOpacityVal: document.getElementById('cardOpacityVal'),
+  cardAngle:      document.getElementById('cardAngle'),
+  cardAngleVal:   document.getElementById('cardAngleVal'),
+  brandSelect:    document.getElementById('brandSelect'),
+  logoSize:       document.getElementById('logoSize'),
+  logoSizeVal:    document.getElementById('logoSizeVal'),
+  logoColor:      document.getElementById('logoColor'),
+  logoUploadBtn:  document.getElementById('logoUploadBtn'),
+  logoInput:      document.getElementById('logoInput'),
+  paramList:      document.getElementById('paramList'),
+  addParamBtn:    document.getElementById('addParamBtn'),
+  paramsFont:     document.getElementById('paramsFont'),
+  paramsSize:     document.getElementById('paramsSize'),
+  paramsSizeVal:  document.getElementById('paramsSizeVal'),
+  captionList:    document.getElementById('captionList'),
+  addCaptionBtn:  document.getElementById('addCaptionBtn'),
+  sectionOrder:   document.getElementById('sectionOrder'),
+  formatSelect:   document.getElementById('formatSelect'),
+  jpgQuality:     document.getElementById('jpgQuality'),
+  jpgQualityVal:  document.getElementById('jpgQualityVal'),
+  saveCfgBtn:     document.getElementById('saveCfgBtn'),
+  loadCfgBtn:     document.getElementById('loadCfgBtn'),
+  cfgInput:       document.getElementById('cfgInput'),
+  downloadBtn:    document.getElementById('downloadBtn'),
+  canvas:         document.getElementById('canvas'),
+  placeholder:    document.getElementById('placeholder'),
+};
+
+const state = {
+  photo: null,            // HTMLImageElement 照片
+  customLogo: null,       // 顶部自定义 Logo
+  logoCache: new Map(),   // `${key}|${color}` -> Image
+  params: [],             // 参数项列表
+  captionItems: [],       // 自定义文本/图片项列表
+  infoOrder: ['logo', 'params', 'caption'],   // 底部信息区三个区块的绘制顺序
+};
+
+/* ================= 品牌 Logo ================= */
+
+// 内置矢量字标路径见 brand_paths.js（Simple Icons，CC0）。
+// 库中没有的 Canon / LUMIX / OLYMPUS / OM SYSTEM 用排版字标近似。
+function textSvg(text, opts) {
+  const fs = 100;
+  const ls = opts.letterSpacing || 0;
+  const pad = fs * 0.35;
+  const w = fs * 0.62 * text.length + ls * (text.length - 1) + pad * 2;
+  const h = fs + pad * 2;
+  const extra = ls ? ` letter-spacing="${ls}px"` : '';
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+    `<text x="${w / 2}" y="${pad + fs}" font-family="${opts.fontFamily}"` +
+    ` font-size="${fs}" font-weight="${opts.fontWeight || 'normal'}"` +
+    ` font-style="${opts.fontStyle || 'normal'}" fill="#161616" text-anchor="middle">` +
+    `<tspan${extra}>${text}</tspan></text></svg>`;
+}
+
+const TEXT_BRANDS = {
+  canon:    textSvg('Canon',     { fontWeight: '700', fontStyle: 'italic', fontFamily: 'Georgia, "Times New Roman", serif' }),
+  lumix:    textSvg('LUMIX',     { fontWeight: '700', letterSpacing: 4,     fontFamily: 'Arial, Helvetica, sans-serif' }),
+  olympus:  textSvg('OLYMPUS',   { fontWeight: '700', letterSpacing: 3,     fontFamily: 'Arial, Helvetica, sans-serif' }),
+  omsystem: textSvg('OM SYSTEM', { fontWeight: '700', letterSpacing: 3,     fontFamily: 'Arial, Helvetica, sans-serif' }),
+};
+
+function brandSvgSource(key, color) {
+  if (BRAND_PATHS[key]) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="${color}" d="${BRAND_PATHS[key].d}"/></svg>`;
+  }
+  if (TEXT_BRANDS[key]) {
+    return TEXT_BRANDS[key].replace(/fill="#[0-9a-fA-F]{6}"/, `fill="${color}"`);
+  }
+  return null;
+}
+
+function brandImage(key, color) {
+  const src = brandSvgSource(key, color);
+  if (!src) return null;
+  const cacheKey = key + '|' + color;
+  if (!state.logoCache.has(cacheKey)) {
+    const img = new Image();
+    img.src = 'data:image/svg+xml;utf8,' + encodeURIComponent(src);
+    img.addEventListener('load', render);      // 加载完成后再画一次
+    state.logoCache.set(cacheKey, img);
+  }
+  return state.logoCache.get(cacheKey);
+}
+
+function activeLogo() {
+  const key = el.brandSelect.value;
+  if (key === 'none') return null;
+  if (key === 'custom') return state.customLogo;
+  return brandImage(key, el.logoColor.value || '#161616');
+}
+
+/* ================= 参数项 ================= */
+
+const PARAM_TYPES = {
+  aperture: { label: '光圈',   def: 'ƒ/1.8' },
+  shutter:  { label: '快门',   def: '1/500s' },
+  iso:      { label: 'ISO',    def: 'ISO 100' },
+  focal:    { label: '焦距',   def: '50mm' },
+  lens:     { label: '镜头',   def: '24-70mm f/2.8' },
+  custom:   { label: '自定义', def: '' },
+};
+
+let paramSeq = 0;
+function newParam(type, value) {
+  return { id: 'p' + (++paramSeq), type, value: value != null ? value : PARAM_TYPES[type].def };
+}
+
+function renderParamList() {
+  el.paramList.innerHTML = '';
+  state.params.forEach((p) => {
+    const row = document.createElement('div');
+    row.className = 'param-row';
+    row.dataset.id = p.id;
+
+    const handle = document.createElement('span');
+    handle.className = 'drag-handle';
+    handle.textContent = '⠿';
+    handle.title = '按住拖拽排序';
+
+    const sel = document.createElement('select');
+    sel.className = 'param-type';
+    Object.entries(PARAM_TYPES).forEach(([k, v]) => {
+      const opt = document.createElement('option');
+      opt.value = k;
+      opt.textContent = v.label;
+      sel.appendChild(opt);
+    });
+    sel.value = p.type;
+    sel.addEventListener('change', () => {
+      p.type = sel.value;
+      input.placeholder = PARAM_TYPES[p.type].def || '输入内容';
+      if (!input.value.trim()) { p.value = PARAM_TYPES[p.type].def; input.value = p.value; }
+      render();
+    });
+
+    const input = document.createElement('input');
+    input.className = 'param-value';
+    input.type = 'text';
+    input.placeholder = PARAM_TYPES[p.type].def || '输入内容';
+    input.value = p.value;
+    input.addEventListener('input', () => { p.value = input.value; render(); });
+
+    const del = document.createElement('button');
+    del.className = 'param-del';
+    del.type = 'button';
+    del.textContent = '×';
+    del.title = '删除此项';
+    del.addEventListener('click', () => {
+      state.params = state.params.filter((x) => x.id !== p.id);
+      renderParamList();
+      render();
+    });
+
+    row.append(handle, sel, input, del);
+    el.paramList.appendChild(row);
+  });
+}
+
+/* ================= 自定义文本 / 图片项 ================= */
+
+let captionSeq = 0;
+function newCaptionItem(type) {
+  const isImg = type === 'image';
+  return { id: 'c' + (++captionSeq), type: type || 'text', value: '', name: '', img: null, size: isImg ? 2.8 : 1.3, font: 'system' };
+}
+
+function renderCaptionList() {
+  el.captionList.innerHTML = '';
+  state.captionItems.forEach((it) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'param-row caption-row';
+    wrap.dataset.id = it.id;
+
+    const main = document.createElement('div');
+    main.className = 'caption-main';
+
+    const handle = document.createElement('span');
+    handle.className = 'drag-handle';
+    handle.textContent = '⠿';
+    handle.title = '按住拖拽排序';
+
+    const sel = document.createElement('select');
+    sel.className = 'param-type';
+    [{ v: 'text', l: '文本' }, { v: 'image', l: '图片' }].forEach((o) => {
+      const opt = document.createElement('option');
+      opt.value = o.v;
+      opt.textContent = o.l;
+      sel.appendChild(opt);
+    });
+    sel.value = it.type;
+    sel.addEventListener('change', () => {
+      it.type = sel.value;
+      if (it.type === 'image') { it.value = ''; it.name = ''; it.img = null; }
+      renderCaptionList();
+      render();
+    });
+
+    const content = document.createElement('div');
+    content.className = 'caption-content';
+
+    if (it.type === 'image') {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'img-pick';
+      btn.textContent = it.img ? '更换图片' : '选择图片';
+      const name = document.createElement('span');
+      name.className = 'img-name';
+      name.textContent = it.name;
+      const file = document.createElement('input');
+      file.type = 'file';
+      file.accept = 'image/*';
+      file.hidden = true;
+      btn.addEventListener('click', () => file.click());
+      file.addEventListener('change', () => {
+        const f = file.files[0];
+        if (!f || !f.type.startsWith('image/')) return;
+        const r = new FileReader();
+        r.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            it.img = img;
+            it.name = f.name;
+            renderCaptionList();
+            render();
+          };
+          img.src = e.target.result;
+        };
+        r.readAsDataURL(f);
+      });
+      content.append(btn, name, file);
+    } else {
+      const input = document.createElement('input');
+      input.className = 'param-value';
+      input.type = 'text';
+      input.placeholder = '输入文本';
+      input.value = it.value;
+      input.addEventListener('input', () => { it.value = input.value; render(); });
+      content.appendChild(input);
+    }
+
+    const del = document.createElement('button');
+    del.className = 'param-del';
+    del.type = 'button';
+    del.textContent = '×';
+    del.title = '删除此项';
+    del.addEventListener('click', () => {
+      state.captionItems = state.captionItems.filter((x) => x.id !== it.id);
+      renderCaptionList();
+      render();
+    });
+
+    main.append(handle, sel, content, del);
+    wrap.appendChild(main);
+
+    // 每个项都有独立的大小滑块（文本 0.5–4%，图片 1–8%）
+    const isImg = it.type === 'image';
+    const sub = document.createElement('label');
+    sub.className = 'caption-sub-row';
+    const lab = document.createElement('span');
+    lab.textContent = '大小';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = isImg ? 1 : 0.5;
+    range.max = isImg ? 8 : 4;
+    range.step = 0.1;
+    range.value = it.size != null ? it.size : (isImg ? 2.8 : 1.3);
+    const val = document.createElement('em');
+    val.textContent = (it.size != null ? it.size : (isImg ? 2.8 : 1.3)).toFixed(1) + '%';
+    range.addEventListener('input', () => {
+      it.size = parseFloat(range.value);
+      val.textContent = it.size.toFixed(1) + '%';
+      render();
+    });
+    sub.append(lab, range, val);
+    wrap.appendChild(sub);
+
+    // 每个文本项都有独立字体
+    if (it.type === 'text') {
+      const frow = document.createElement('label');
+      frow.className = 'caption-sub-row font-row';
+      const flab = document.createElement('span');
+      flab.textContent = '字体';
+      const fsel = document.createElement('select');
+      fsel.className = 'param-type';
+      Object.keys(FONTS).forEach((k) => {
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.textContent = k === 'system' ? '系统默认'
+          : k === 'serif' ? '衬线 Serif'
+          : k === 'mono' ? '等宽 Mono'
+          : k + (k === 'Great Vibes' ? '（手写体）' : '');
+        fsel.appendChild(opt);
+      });
+      fsel.value = it.font || 'system';
+      fsel.addEventListener('change', () => {
+        it.font = fsel.value;
+        ensureFont(it.font).then(render);
+      });
+      frow.append(flab, fsel);
+      wrap.appendChild(frow);
+    }
+
+    el.captionList.appendChild(wrap);
+  });
+}
+
+/* ================= 列表通用拖拽排序 ================= */
+
+function dragAfterElement(container, y) {
+  const rows = [...container.querySelectorAll('.param-row:not(.dragging)')];
+  return rows.reduce((closest, row) => {
+    const box = row.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closest.offset) return { offset, element: row };
+    return closest;
+  }, { offset: -Infinity }).element || null;
+}
+
+// 基于 Pointer 事件的手柄拖拽：只有按住 ⠿ 手柄才开始，
+// 与滑块 / 输入框操作天然不冲突，也比 HTML5 DnD 更稳定。
+function bindSortable(listEl, getItems, afterDrop) {
+  listEl.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle || e.button !== 0) return;
+    const row = handle.closest('.param-row');
+    if (!row) return;
+    e.preventDefault();
+    row.classList.add('dragging');
+
+    const move = (ev) => {
+      const after = dragAfterElement(listEl, ev.clientY);
+      if (after == null) listEl.appendChild(row);
+      else listEl.insertBefore(row, after);
+    };
+    const done = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', done);
+      window.removeEventListener('pointercancel', done);
+      row.classList.remove('dragging');
+      const items = getItems();
+      const order = [...listEl.querySelectorAll('.param-row')].map((r) => r.dataset.id);
+      const map = new Map(items.map((i) => [i.id, i]));
+      const reordered = order.map((id) => map.get(id)).filter(Boolean);
+      items.length = 0;
+      items.push(...reordered);
+      afterDrop();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
+  });
+}
+
+/* ================= 底部信息区块顺序 ================= */
+
+const SECTION_NAMES = { logo: 'Logo', params: '参数', caption: '文本' };
+
+function renderSectionOrder() {
+  el.sectionOrder.innerHTML = '';
+  state.infoOrder.forEach((key, idx) => {
+    const row = document.createElement('div');
+    row.className = 'order-row';
+
+    const label = document.createElement('span');
+    label.textContent = `${idx + 1}. ${SECTION_NAMES[key]}`;
+
+    const btns = document.createElement('span');
+    btns.className = 'order-btns';
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'order-btn';
+    up.textContent = '▲';
+    up.disabled = idx === 0;
+    up.addEventListener('click', () => moveInfoSection(key, -1));
+    const down = document.createElement('button');
+    down.type = 'button';
+    down.className = 'order-btn';
+    down.textContent = '▼';
+    down.disabled = idx === state.infoOrder.length - 1;
+    down.addEventListener('click', () => moveInfoSection(key, 1));
+    btns.append(up, down);
+
+    row.append(label, btns);
+    el.sectionOrder.appendChild(row);
+  });
+}
+
+function moveInfoSection(key, dir) {
+  const i = state.infoOrder.indexOf(key);
+  const j = i + dir;
+  if (j < 0 || j >= state.infoOrder.length) return;
+  [state.infoOrder[i], state.infoOrder[j]] = [state.infoOrder[j], state.infoOrder[i]];
+  renderSectionOrder();
+  render();
+}
+
+/* ================= 字体 ================= */
+
+const FONTS = {
+  system:            '-apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif',
+  serif:             'Georgia, "Times New Roman", serif',
+  mono:              '"SF Mono", Menlo, Consolas, monospace',
+  'Playfair Display': '"Playfair Display", Georgia, serif',
+  'Cormorant Garamond': '"Cormorant Garamond", Georgia, serif',
+  Lora:              '"Lora", Georgia, serif',
+  Montserrat:        '"Montserrat", "Helvetica Neue", Arial, sans-serif',
+  'Great Vibes':     '"Great Vibes", cursive',
+};
+
+function activeFont(key) { return FONTS[key] || FONTS.system; }
+
+function ensureFont(key) {
+  const fam = FONTS[key];
+  if (!fam || !('fonts' in document)) return Promise.resolve();
+  const weight = key === 'Great Vibes' ? '400' : '500';
+  return Promise.all([document.fonts.load(`${weight} 40px ${fam}`), document.fonts.ready]).catch(() => {});
+}
+
+/* ================= 图片加载 ================= */
+
+function imgFromSrc(src) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+function loadPhoto(src, name) {
+  const img = new Image();
+  img.onload = () => {
+    state.photo = img;
+    el.fileName.textContent = name || '';
+    el.placeholder.hidden = true;
+    el.canvas.hidden = false;
+    render();
+  };
+  img.src = src;
+}
+
+function handleFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = (e) => loadPhoto(e.target.result, file.name);
+  reader.readAsDataURL(file);
+}
+
+function handleLogoFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img = new Image();
+    img.onload = () => {
+      state.customLogo = img;
+      el.brandSelect.value = 'custom';
+      render();
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+/* ================= 示例图片 ================= */
+
+function makeSamplePhoto() {
+  const c = document.createElement('canvas');
+  c.width = 1600; c.height = 1000;
+  const g = c.getContext('2d');
+
+  const sky = g.createLinearGradient(0, 0, 0, c.height);
+  sky.addColorStop(0, '#7ec3e8');
+  sky.addColorStop(0.6, '#cdeaf6');
+  sky.addColorStop(1, '#eef6ef');
+  g.fillStyle = sky;
+  g.fillRect(0, 0, c.width, c.height);
+
+  const sx = c.width * 0.78, sy = c.height * 0.30;
+  const glow = g.createRadialGradient(sx, sy, 10, sx, sy, 280);
+  glow.addColorStop(0, 'rgba(255,246,214,1)');
+  glow.addColorStop(1, 'rgba(255,246,214,0)');
+  g.fillStyle = glow; g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = '#fff3cf';
+  g.beginPath(); g.arc(sx, sy, 56, 0, Math.PI * 2); g.fill();
+
+  g.fillStyle = '#8fa8b8';
+  g.beginPath();
+  g.moveTo(0, c.height * 0.62);
+  g.lineTo(c.width * 0.18, c.height * 0.34);
+  g.lineTo(c.width * 0.36, c.height * 0.50);
+  g.lineTo(c.width * 0.52, c.height * 0.30);
+  g.lineTo(c.width * 0.72, c.height * 0.48);
+  g.lineTo(c.width * 0.90, c.height * 0.32);
+  g.lineTo(c.width, c.height * 0.50);
+  g.lineTo(c.width, c.height * 0.62);
+  g.closePath(); g.fill();
+
+  g.fillStyle = '#5d7d8a';
+  g.beginPath();
+  g.moveTo(0, c.height * 0.78);
+  g.lineTo(c.width * 0.25, c.height * 0.50);
+  g.lineTo(c.width * 0.50, c.height * 0.66);
+  g.lineTo(c.width * 0.75, c.height * 0.48);
+  g.lineTo(c.width, c.height * 0.62);
+  g.lineTo(c.width, c.height * 0.78);
+  g.closePath(); g.fill();
+
+  g.fillStyle = '#3c5a49';
+  g.fillRect(0, c.height * 0.78, c.width, c.height * 0.22);
+
+  g.fillStyle = '#2c4436';
+  for (let i = 0; i < 7; i++) {
+    const x = c.width * (0.06 + i * 0.15);
+    const th = c.height * 0.13;
+    const bw = c.height * 0.05;
+    g.beginPath();
+    g.moveTo(x, c.height * 0.76 - th);
+    g.lineTo(x - bw, c.height * 0.76);
+    g.lineTo(x + bw, c.height * 0.76);
+    g.closePath(); g.fill();
+  }
+
+  return c.toDataURL('image/png');
+}
+
+/* ================= 渲染 ================= */
+
+function render() {
+  const ctx = el.canvas.getContext('2d');
+  if (!state.photo) return;
+
+  const photoW = state.photo.naturalWidth;
+  const photoH = state.photo.naturalHeight;
+  const sidePx   = photoW * parseFloat(el.sideScale.value);
+  const topPx    = photoW * parseFloat(el.topScale.value);
+  const bottomPx = photoW * parseFloat(el.bottomScale.value);
+  const baseOn   = el.baseToggle.checked;
+  const outer    = baseOn ? Math.max(10, Math.round(photoW * 0.02)) : 0; // 白色底座外扩
+
+  const cardW = photoW + sidePx * 2;
+  const cardH = photoH + topPx + bottomPx;
+  const scale = Math.min(1, MAX_OUT / Math.max(cardW, cardH));
+
+  const W = Math.round(cardW * scale);
+  const H = Math.round(cardH * scale);
+  el.canvas.width  = W + outer * 2;
+  el.canvas.height = H + outer * 2;
+
+  ctx.imageSmoothingQuality = 'high';
+  ctx.clearRect(0, 0, el.canvas.width, el.canvas.height);
+
+  // 白色底座（外部白底）
+  if (baseOn) {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, el.canvas.width, el.canvas.height);
+  }
+
+  // 白色边框卡片。底座开启时：先用投影画一遍卡片，形成卡片压在白底上的层次感
+  if (baseOn) {
+    ctx.save();
+    const op = parseInt(el.cardOpacity.value) / 100;
+    const rad = parseInt(el.cardAngle.value) * Math.PI / 180;
+    ctx.shadowColor = `rgba(0,0,0,${op})`;
+    ctx.shadowBlur  = Math.max(4, W * 0.02);
+    ctx.shadowOffsetX = Math.cos(rad) * Math.max(3, W * 0.008);
+    ctx.shadowOffsetY = Math.sin(rad) * Math.max(3, W * 0.008);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(outer, outer, W, H);
+    ctx.restore();
+  }
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(outer, outer, W, H);
+
+  // 照片（可带阴影）
+  const px = outer + Math.round(sidePx * scale);
+  const py = outer + Math.round(topPx * scale);
+  const pw = Math.round(photoW * scale);
+  const ph = Math.round(photoH * scale);
+
+  if (el.shadowToggle.checked) {
+    ctx.save();
+    const op = parseInt(el.photoOpacity.value) / 100;
+    const rad = parseInt(el.photoAngle.value) * Math.PI / 180;
+    ctx.shadowColor = `rgba(0,0,0,${op})`;
+    ctx.shadowBlur  = Math.max(2, W * 0.012);
+    ctx.shadowOffsetX = Math.cos(rad) * Math.max(1, W * 0.004);
+    ctx.shadowOffsetY = Math.sin(rad) * Math.max(1, W * 0.004);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(px, py, pw, ph);
+    ctx.restore();
+  }
+  ctx.drawImage(state.photo, px, py, pw, ph);
+
+  // 底部信息区
+  const infoTop = py + ph;
+  const infoH = H - (py + ph) + outer;
+  drawInfo(ctx, infoTop, infoH, W, outer);
+}
+
+function drawInfo(ctx, top, h, W, ox) {
+  let y = top + h * 0.10;
+  const cx = ox + W / 2;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  const fitWidth = W - Math.max(20, W * 0.04);
+
+  // 按用户设定的顺序绘制：logo / params / caption
+  for (const key of state.infoOrder) {
+    if (key === 'logo') {
+      const logo = activeLogo();
+      if (logo && logo.naturalWidth) {
+        const lh = Math.min(h * 0.35, clamp(W * (parseFloat(el.logoSize.value) || 3.2) / 100, 8, 160));
+        const lw = lh * (logo.naturalWidth / logo.naturalHeight);
+        ctx.drawImage(logo, cx - lw / 2, y, lw, lh);
+        y += lh + h * 0.06;
+
+        ctx.strokeStyle = 'rgba(0,0,0,0.10)';
+        ctx.lineWidth = Math.max(1, W * 0.0008);
+        const dw = Math.max(24, W * 0.03);
+        ctx.beginPath();
+        ctx.moveTo(cx - dw / 2, y);
+        ctx.lineTo(cx + dw / 2, y);
+        ctx.stroke();
+        y += h * 0.05;
+      }
+    } else if (key === 'params') {
+      // 参数：各参数项以「 · 」连接为一行，过长自动缩小字号
+      const items = state.params.map((p) => p.value.trim()).filter(Boolean);
+      const paramsText = items.join(' · ');
+      if (paramsText) {
+        const fam = activeFont(el.paramsFont.value);
+        const weight = el.paramsFont.value === 'Great Vibes' ? '400' : '500';
+        let pSize = clamp(W * (parseFloat(el.paramsSize.value) || 1.5) / 100, 8, 96);
+        ctx.font = `${weight} ${pSize}px ${fam}`;
+        while (ctx.measureText(paramsText).width > fitWidth && pSize > 7) {
+          pSize -= 1;
+          ctx.font = `${weight} ${pSize}px ${fam}`;
+        }
+        ctx.fillStyle = '#111111';
+        ctx.fillText(paramsText, cx, y + pSize);
+        y += pSize * 1.9;
+      }
+    } else if (key === 'caption') {
+      // 自定义文本位：支持多个文本 / 图片项，逐行堆叠
+      for (const it of state.captionItems) {
+        if (it.type === 'image' && it.img) {
+          const lh = Math.min(h * 0.35, clamp(W * ((it.size || 2.8) / 100), 6, 160));
+          const lw = lh * (it.img.naturalWidth / it.img.naturalHeight);
+          ctx.drawImage(it.img, cx - lw / 2, y, lw, lh);
+          y += lh + h * 0.06;
+        } else if (it.type === 'text' && it.value.trim()) {
+          const caption = it.value.trim();
+          const fkey = it.font || 'system';
+          const fam = activeFont(fkey);
+          const fweight = fkey === 'Great Vibes' ? '400' : '500';
+          let nSize = clamp(W * ((it.size || 1.3) / 100), 7, 88);
+          ctx.font = `${fweight} ${nSize}px ${fam}`;
+          while (ctx.measureText(caption).width > fitWidth && nSize > 7) {
+            nSize -= 1;
+            ctx.font = `${fweight} ${nSize}px ${fam}`;
+          }
+          ctx.fillStyle = '#3a3a3a';
+          ctx.fillText(caption, cx, y + nSize);
+          y += nSize * 1.7;
+        }
+      }
+    }
+  }
+}
+
+/* ================= 作品导出 / 导入（.boarderconf = ZIP） ================= */
+
+// 把当前作品打包成 .boarderconf（标准 ZIP：settings.json + 照片/图片）
+async function exportBoarderconf() {
+  const entries = [];
+  const refs = { imgs: {} };
+
+  async function addImage(dataUrl, prefix) {
+    if (!dataUrl) return null;
+    const bytes = new Uint8Array(await (await fetch(dataUrl)).arrayBuffer());
+    const m = /^data:image\/([a-z0-9+]+)/i.exec(dataUrl);
+    let ext = m ? m[1].toLowerCase() : 'png';
+    if (ext === 'jpeg') ext = 'jpg';
+    if (!['png', 'jpg', 'gif', 'webp', 'bmp'].includes(ext)) ext = 'png';
+    const name = `images/${prefix}.${ext}`;
+    entries.push({ name, data: bytes });
+    return name;
+  }
+
+  // 注意：不打包主照片，只打包自定义 Logo 与自定义文本里的图片 + 全部设置
+  refs.logo = await addImage(state.customLogo ? state.customLogo.src : null, 'logo');
+  for (const it of state.captionItems) {
+    if (it.type === 'image') refs.imgs[it.id] = await addImage(it.img ? it.img.src : null, 'img' + it.id);
+  }
+
+  const cfg = buildConfig(refs);
+  entries.push({ name: 'settings.json', data: new TextEncoder().encode(JSON.stringify(cfg, null, 2)) });
+  return zip.zipCreate(entries);
+}
+
+function buildConfig(refs) {
+  refs = refs || {};
+  return {
+    version: 2,
+    border: {
+      side: el.sideScale.value,
+      top: el.topScale.value,
+      bottom: el.bottomScale.value,
+    },
+    effects: {
+      photoShadow: el.shadowToggle.checked,
+      photoOpacity: el.photoOpacity.value,
+      photoAngle: el.photoAngle.value,
+      base: el.baseToggle.checked,
+      cardOpacity: el.cardOpacity.value,
+      cardAngle: el.cardAngle.value,
+    },
+    logo: {
+      brand: el.brandSelect.value,
+      size: el.logoSize.value,
+      color: el.logoColor.value,
+      customLogoData: refs.logo || null,
+    },
+    params: state.params.map((p) => ({ type: p.type, value: p.value })),
+    caption: {
+      items: state.captionItems.map((it) => ({
+        type: it.type,
+        value: it.type === 'image' ? it.name : it.value,
+        img: (it.type === 'image' && refs.imgs) ? (refs.imgs[it.id] || null) : null,
+        size: it.size,
+        font: it.font,
+      })),
+    },
+    fonts: {
+      paramsFont: el.paramsFont.value,
+      paramsSize: el.paramsSize.value,
+    },
+    sectionOrder: state.infoOrder.slice(),
+  };
+}
+
+// resolve: (path) => Promise<dataUrl/objectUrl>，用于 .boarderconf 内图片；纯 JSON 旧格式时省略
+async function applyConfig(cfg, resolve) {
+  if (!cfg || (cfg.version !== 1 && cfg.version !== 2)) throw new Error('版本不兼容');
+  const b = cfg.border || {};
+  el.sideScale.value = b.side != null ? b.side : 0.08;
+  el.topScale.value = b.top != null ? b.top : 0.05;
+  el.bottomScale.value = b.bottom != null ? b.bottom : 0.18;
+
+  const e = cfg.effects || {};
+  el.shadowToggle.checked = !!e.photoShadow;
+  el.photoOpacity.value = e.photoOpacity != null ? e.photoOpacity : 20;
+  el.photoAngle.value = e.photoAngle != null ? e.photoAngle : 90;
+  el.baseToggle.checked = !!e.base;
+  el.cardOpacity.value = e.cardOpacity != null ? e.cardOpacity : 28;
+  el.cardAngle.value = e.cardAngle != null ? e.cardAngle : 90;
+
+  const lg = cfg.logo || {};
+  el.brandSelect.value = lg.brand || 'none';
+  el.logoSize.value = lg.size != null ? lg.size : 3.2;
+  el.logoColor.value = lg.color || '#161616';
+  if (lg.customLogoData) {
+    const src = resolve ? await resolve(lg.customLogoData) : lg.customLogoData;
+    state.customLogo = src ? await imgFromSrc(src) : null;
+  } else {
+    state.customLogo = null;
+  }
+
+  state.params = (cfg.params || []).map((p) => newParam(p.type, p.value));
+  if (!state.params.length) state.params = [newParam('aperture'), newParam('shutter'), newParam('iso'), newParam('focal')];
+
+  const c = cfg.caption || {};
+  state.captionItems = [];
+  const items = (c.items || []).slice();
+  if (!items.length) items.push({ type: 'text', value: '@photographer' });
+  for (const it of items) {
+    if (it.type === 'image') {
+      const item = newCaptionItem('image');
+      item.name = it.value || '';
+      const src = it.img ? (resolve ? await resolve(it.img) : it.img) : null;
+      item.img = src ? await imgFromSrc(src) : null;
+      item.size = it.size != null ? it.size : 2.8;
+      state.captionItems.push(item);
+    } else {
+      const item = newCaptionItem('text');
+      item.value = it.value || '';
+      item.size = it.size != null ? it.size : 1.3;
+      item.font = it.font || 'system';
+      state.captionItems.push(item);
+    }
+  }
+
+  const f = cfg.fonts || {};
+  el.paramsFont.value = f.paramsFont || 'system';
+  el.paramsSize.value = f.paramsSize != null ? f.paramsSize : 1.5;
+
+  state.infoOrder = (Array.isArray(cfg.sectionOrder) && cfg.sectionOrder.length)
+    ? cfg.sectionOrder.slice()
+    : ['logo', 'params', 'caption'];
+
+  syncVals();
+  renderParamList();
+  renderCaptionList();
+  renderSectionOrder();
+  render();
+}
+
+/* ================= 事件绑定 ================= */
+
+function timestamp() {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function syncVals() {
+  el.sideScaleVal.textContent   = Math.round(el.sideScale.value   * 1000) / 10 + '%';
+  el.topScaleVal.textContent    = Math.round(el.topScale.value    * 1000) / 10 + '%';
+  el.bottomScaleVal.textContent = Math.round(el.bottomScale.value * 1000) / 10 + '%';
+  el.paramsSizeVal.textContent  = parseFloat(el.paramsSize.value).toFixed(1) + '%';
+  el.logoSizeVal.textContent    = parseFloat(el.logoSize.value).toFixed(1) + '%';
+  el.photoOpacityVal.textContent = el.photoOpacity.value + '%';
+  el.photoAngleVal.textContent  = el.photoAngle.value + '°';
+  el.cardOpacityVal.textContent = el.cardOpacity.value + '%';
+  el.cardAngleVal.textContent   = el.cardAngle.value + '°';
+  el.jpgQualityVal.textContent  = Math.round(parseFloat(el.jpgQuality.value) * 100) + '%';
+}
+
+function bindEvents() {
+  syncVals();
+
+  // 拖拽 / 点击上传照片
+  el.dropZone.addEventListener('click', () => el.fileInput.click());
+  el.fileInput.addEventListener('change', () => handleFile(el.fileInput.files[0]));
+  ['dragenter', 'dragover'].forEach((ev) =>
+    el.dropZone.addEventListener(ev, (e) => { e.preventDefault(); el.dropZone.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach((ev) =>
+    el.dropZone.addEventListener(ev, (e) => { e.preventDefault(); el.dropZone.classList.remove('drag'); }));
+  el.dropZone.addEventListener('drop', (e) => handleFile(e.dataTransfer.files[0]));
+
+  // 示例图
+  el.sampleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    loadPhoto(makeSamplePhoto(), '示例图片（可替换）');
+  });
+
+  // 顶部自定义 Logo
+  el.logoUploadBtn.addEventListener('click', () => el.logoInput.click());
+  el.logoInput.addEventListener('change', () => handleLogoFile(el.logoInput.files[0]));
+
+  // 参数项列表
+  el.addParamBtn.addEventListener('click', () => {
+    state.params.push(newParam('custom'));
+    renderParamList();
+    render();
+  });
+  bindSortable(el.paramList, () => state.params, () => { renderParamList(); render(); });
+
+  // 自定义文本 / 图片项列表
+  el.addCaptionBtn.addEventListener('click', () => {
+    state.captionItems.push(newCaptionItem('text'));
+    renderCaptionList();
+    render();
+  });
+  bindSortable(el.captionList, () => state.captionItems, () => { renderCaptionList(); render(); });
+
+  // 底部信息区块顺序（Logo / 参数 / 文本）
+  renderSectionOrder();
+
+  // 字体（等网页字体加载完再重绘）；每个文本项的字体在列表里各自处理
+  el.paramsFont.addEventListener('change', () => ensureFont(el.paramsFont.value).then(render));
+
+  // 下载（PNG / JPG）
+  el.downloadBtn.addEventListener('click', () => {
+    if (!state.photo) return;
+    const fmt = el.formatSelect.value;
+    let dataUrl;
+    if (fmt === 'jpg') {
+      const c = document.createElement('canvas');
+      c.width = el.canvas.width;
+      c.height = el.canvas.height;
+      const g = c.getContext('2d');
+      g.fillStyle = '#ffffff';          // JPG 无透明，铺白底
+      g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(el.canvas, 0, 0);
+      dataUrl = c.toDataURL('image/jpeg', parseFloat(el.jpgQuality.value));
+    } else {
+      dataUrl = el.canvas.toDataURL('image/png');
+    }
+    const a = document.createElement('a');
+    a.download = `framed_${timestamp()}.${fmt === 'jpg' ? 'jpg' : 'png'}`;
+    a.href = dataUrl;
+    a.click();
+  });
+
+  // 作品导出 / 导入（.boarderconf；旧版纯 JSON 设置仍可导入）
+  el.saveCfgBtn.addEventListener('click', async () => {
+    try {
+      const bytes = await exportBoarderconf();
+      const blob = new Blob([bytes], { type: 'application/octet-stream' });
+      const a = document.createElement('a');
+      a.download = `frame_settings_${timestamp()}.boarderconf`;
+      a.href = URL.createObjectURL(blob);
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      alert('导出失败：' + err.message);
+    }
+  });
+  el.loadCfgBtn.addEventListener('click', () => el.cfgInput.click());
+  el.cfgInput.addEventListener('change', async () => {
+    const f = el.cfgInput.files[0];
+    if (!f) return;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    try {
+      if (buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b) {
+        // .boarderconf（ZIP）
+        const entries = zip.zipRead(buf);
+        const map = new Map(entries.map((en) => [en.name, en.data]));
+        const cfgData = map.get('settings.json');
+        if (!cfgData) throw new Error('压缩包里缺少 settings.json');
+        const cfg = JSON.parse(new TextDecoder('utf-8').decode(cfgData));
+        const urlCache = new Map();
+        const resolve = async (path) => {
+          if (urlCache.has(path)) return urlCache.get(path);
+          const data = map.get(path);
+          if (!data) return null;
+          const ext = (path.match(/\.([a-z0-9]+)$/i) || [])[1];
+          const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
+                     : ext === 'gif' ? 'image/gif'
+                     : ext === 'webp' ? 'image/webp'
+                     : 'image/png';
+          const url = URL.createObjectURL(new Blob([data], { type: mime }));
+          urlCache.set(path, url);
+          return url;
+        };
+        await applyConfig(cfg, resolve);
+      } else {
+        // 兼容旧版纯 JSON 设置（v1，图片为 base64 内嵌）
+        await applyConfig(JSON.parse(new TextDecoder('utf-8').decode(buf)));
+      }
+      el.cfgInput.value = '';
+    } catch (err) {
+      alert('导入失败：' + err.message);
+    }
+  });
+
+  // 任意控件变化即重绘
+  const controls = [el.sideScale, el.topScale, el.bottomScale, el.shadowToggle,
+                    el.photoOpacity, el.photoAngle, el.baseToggle, el.cardOpacity, el.cardAngle,
+                    el.brandSelect, el.logoSize, el.logoColor,
+                    el.paramsFont, el.paramsSize, el.jpgQuality];
+  controls.forEach((c) => c.addEventListener('input', () => { syncVals(); render(); }));
+  controls.forEach((c) => c.addEventListener('change', () => { syncVals(); render(); }));
+}
+
+/* ================= 启动 ================= */
+
+bindEvents();
+state.params = [newParam('aperture'), newParam('shutter'), newParam('iso'), newParam('focal')];
+const defCaption = newCaptionItem('text');
+defCaption.value = '@photographer';
+state.captionItems.push(defCaption);
+renderParamList();
+renderCaptionList();
+loadPhoto(makeSamplePhoto(), '示例图片（可替换）');

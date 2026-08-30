@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>照片加边框 · Photo Boarder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Cormorant+Garamond:wght@400;500&family=Montserrat:wght@400;500;600&family=Lora:wght@400;500&family=Great+Vibes&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="panel">
+    <h1>照片加边框</h1>
+    <p class="subtitle">上传照片 → 自动生成白框 → 下载</p>
+
+    <section class="card">
+      <h2>照片</h2>
+      <div id="dropZone" class="drop-zone">
+        <input type="file" id="fileInput" accept="image/*" hidden>
+        <p class="dz-main">点击或拖入照片</p>
+        <button id="sampleBtn" type="button" class="ghost">使用示例图片</button>
+      </div>
+      <p id="fileName" class="file-name"></p>
+    </section>
+
+    <section class="card">
+      <h2>边框宽度</h2>
+      <label class="range-row">
+        <span>左右</span>
+        <input type="range" id="sideScale" min="0" max="0.30" step="0.005" value="0.08">
+        <em id="sideScaleVal">8%</em>
+      </label>
+      <label class="range-row">
+        <span>上</span>
+        <input type="range" id="topScale" min="0" max="0.30" step="0.005" value="0.05">
+        <em id="topScaleVal">5%</em>
+      </label>
+      <label class="range-row">
+        <span>下</span>
+        <input type="range" id="bottomScale" min="0.03" max="0.55" step="0.005" value="0.18">
+        <em id="bottomScaleVal">18%</em>
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>效果</h2>
+      <div class="shadow-group">
+        <label class="switch">
+          <input type="checkbox" id="shadowToggle" checked>
+          <span class="track"></span> 照片阴影
+        </label>
+        <label class="range-row">
+          <span>强度</span>
+          <input type="range" id="photoOpacity" min="0" max="100" step="1" value="20">
+          <em id="photoOpacityVal">20%</em>
+        </label>
+        <label class="range-row">
+          <span>角度</span>
+          <input type="range" id="photoAngle" min="0" max="360" step="1" value="90">
+          <em id="photoAngleVal">90°</em>
+        </label>
+      </div>
+      <div class="shadow-group">
+        <label class="switch">
+          <input type="checkbox" id="baseToggle">
+          <span class="track"></span> 白色底座（卡片投影）
+        </label>
+        <label class="range-row">
+          <span>强度</span>
+          <input type="range" id="cardOpacity" min="0" max="100" step="1" value="28">
+          <em id="cardOpacityVal">28%</em>
+        </label>
+        <label class="range-row">
+          <span>角度</span>
+          <input type="range" id="cardAngle" min="0" max="360" step="1" value="90">
+          <em id="cardAngleVal">90°</em>
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>底部信息</h2>
+
+      <label class="field">
+        <span>相机 Logo</span>
+        <select id="brandSelect">
+          <option value="none">无 Logo</option>
+          <option value="canon">Canon</option>
+          <option value="nikon">Nikon</option>
+          <option value="sony">Sony</option>
+          <option value="fujifilm">FUJIFILM</option>
+          <option value="leica">LEICA</option>
+          <option value="panasonic">Panasonic</option>
+          <option value="lumix">LUMIX</option>
+          <option value="olympus">OLYMPUS</option>
+          <option value="omsystem">OM SYSTEM</option>
+          <option value="custom">自定义 Logo…</option>
+        </select>
+        <button id="logoUploadBtn" type="button" class="ghost small">上传自定义 Logo</button>
+        <input type="file" id="logoInput" accept="image/*" hidden>
+      </label>
+
+      <div class="field">
+        <span>Logo 大小</span>
+        <label class="range-row">
+          <span>大小</span>
+          <input type="range" id="logoSize" min="1" max="10" step="0.1" value="3.2">
+          <em id="logoSizeVal">3.2%</em>
+        </label>
+      </div>
+
+      <label class="field">
+        <span>Logo 颜色（自定义 Logo 不生效）</span>
+        <input type="color" id="logoColor" value="#161616">
+      </label>
+
+      <div class="field">
+        <span>内容项间距</span>
+        <label class="range-row">
+          <span>间距</span>
+          <input type="range" id="gap" min="0.2" max="6" step="0.1" value="0.8">
+          <em id="gapVal">0.8%</em>
+        </label>
+      </div>
+
+      <div class="field">
+        <span>与照片间距</span>
+        <label class="range-row">
+          <span>距离</span>
+          <input type="range" id="infoGap" min="0" max="8" step="0.1" value="1.5">
+          <em id="infoGapVal">1.5%</em>
+        </label>
+      </div>
+
+      <div class="field">
+        <span>内容列表（Logo / 参数 / 文本 / 图片；默认同一行，每项可单独「换行」；按住 ⠿ 拖拽排序）</span>
+        <div id="infoList" class="param-list"></div>
+        <div class="add-row">
+          <select id="addKindSelect">
+            <option value="param">参数</option>
+            <option value="text">文本</option>
+            <option value="image">图片</option>
+            <option value="logo">Logo</option>
+          </select>
+          <button id="addInfoBtn" type="button" class="ghost small">+ 添加</button>
+          <button id="presetBtn" type="button" class="ghost small">重置预设</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="card">
+      <div class="field">
+        <span>导出格式</span>
+        <select id="formatSelect">
+          <option value="png">PNG（支持透明）</option>
+          <option value="jpg">JPG（白底，文件更小）</option>
+        </select>
+        <label class="range-row">
+          <span>质量</span>
+          <input type="range" id="jpgQuality" min="0.5" max="1" step="0.01" value="0.92">
+          <em id="jpgQualityVal">92%</em>
+        </label>
+      </div>
+    </div>
+
+    <button id="downloadBtn" type="button" class="download">⬇ 下载图片</button>
+
+    <div class="card">
+      <div class="field">
+        <span>保存 / 恢复作品（.boarderconf，内含自定义 Logo 与图片，不含主照片）</span>
+        <div class="btn-row">
+          <button id="saveCfgBtn" type="button" class="ghost">导出 .boarderconf</button>
+          <button id="loadCfgBtn" type="button" class="ghost">导入设置</button>
+          <input type="file" id="cfgInput" accept=".boarderconf,.zip,.json,application/octet-stream,application/zip,application/json" hidden>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="stage">
+    <canvas id="canvas" hidden></canvas>
+    <p id="placeholder">正在加载示例图…</p>
+  </main>
+</div>
+<script src="brand_paths.js"></script>
+<script src="pako.min.js"></script>
+<script src="zip.js"></script>
+<script src="exif.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
